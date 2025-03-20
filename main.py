@@ -1,215 +1,329 @@
-import os
-import ftplib
 import pandas as pd
+import numpy as np
 import requests
+from datetime import datetime
+import os
+from ftplib import FTP
 from google.cloud import storage
-import random
 
-# ----------------------------
-# FTP DOWNLOAD CONFIGURATION
-# ----------------------------
-FTP_SERVER = "ftp.nivoda.net"
-FTP_PORT = 21
-FTP_USERNAME = "leeladiamondscorporate@gmail.com"
-FTP_PASSWORD = "r[Eu;9NB"
+##############################################
+# FTP DOWNLOAD: Retrieve CSV from remote FTP server
+##############################################
 
-# Use the environment variable FTP_DOWNLOAD_DIR (default to /tmp/raw)
-ftp_download_dir = os.environ.get("FTP_DOWNLOAD_DIR", "/tmp/raw")
-os.makedirs(ftp_download_dir, exist_ok=True)
+ftp_server = "ftp.nivoda.net"
+ftp_user = "leeladiamondscorporate@gmail.com"
+ftp_password = "r[Eu;9NB"
+remote_file = "Leela Diamond_labgrown.csv"
+local_file = "Labgrown.csv"  # Relative path
 
-ftp_files = {
-    "natural": {
-         "remote_filename": "Leela Diamond_natural.csv",
-         "local_path": os.path.join(ftp_download_dir, "Natural.csv")
-    },
-    "lab_grown": {
-         "remote_filename": "Leela Diamond_labgrown.csv",
-         "local_path": os.path.join(ftp_download_dir, "Labgrown.csv")
-    },
-    "gemstone": {
-         "remote_filename": "Leela Diamond_gemstones.csv",
-         "local_path": os.path.join(ftp_download_dir, "gemstones.csv")
-    }
-}
+try:
+    with FTP(ftp_server) as ftp:
+        ftp.login(user=ftp_user, passwd=ftp_password)
+        print("FTP login successful.")
+        with open(local_file, "wb") as f:
+            ftp.retrbinary("RETR " + remote_file, f.write)
+        print(f"Downloaded '{remote_file}' to '{local_file}'.")
+except Exception as e:
+    print("Error downloading file from FTP:", e)
+    exit(1)
 
-def download_file_from_ftp(remote_filename, local_path):
-    """Download a file from the FTP server to a local path."""
+##############################################
+# PART 1: DATA IMPORT, FILTERING & BALANCED SELECTION
+##############################################
+
+def map_shape(row):
+    raw_shape = str(row.get('shape', '')).strip().upper()
     try:
-        with ftplib.FTP() as ftp:
-            ftp.connect(FTP_SERVER, FTP_PORT)
-            ftp.login(FTP_USERNAME, FTP_PASSWORD)
-            with open(local_path, 'wb') as f:
-                ftp.retrbinary(f"RETR {remote_filename}", f.write)
-            print(f"Downloaded {remote_filename} to {local_path}")
+        float(row.get('length', 0))
+        float(row.get('width', 0))
+    except Exception:
+        pass
+    if raw_shape in ['SQ EMERALD', 'ASSCHER']:
+        return 'Asscher'
+    if raw_shape in ['CUSHION', 'CUSHION BRILLIANT']:
+        return 'Cushion'
+    allowed = ['ROUND', 'OVAL', 'PRINCESS', 'EMERALD', 'MARQUISE', 'PEAR', 'RADIANT', 'HEART']
+    if raw_shape in allowed:
+        return raw_shape.title()
+    return None
+
+def compute_ratio(row):
+    try:
+        l = float(row.get('length', 0))
+        w = float(row.get('width', 0))
+        if w:
+            return l / w
+    except Exception:
+        pass
+    return np.nan
+
+def compute_measurement(row):
+    return f"{row.get('length', '')} x {row.get('width', '')} - {row.get('height', '')}"
+
+def valid_cut(row):
+    shape = str(row.get('FinalShape', '')).upper()
+    if shape == 'ROUND':
+        cut = str(row.get('cut', '')).strip().upper()
+        return cut in ['EX', 'IDEAL', 'EXCELLENT']
+    else:
+        return True
+
+def clarity_group(clarity_raw):
+    clarity_raw = str(clarity_raw).upper().strip()
+    if clarity_raw.startswith("VVS"):
+        return "VVS"
+    elif clarity_raw.startswith("VS"):
+        return "VS"
+    else:
+        return None
+
+def clarity_matches(row_clarity, group_clarity):
+    grp = clarity_group(row_clarity)
+    if group_clarity == 'VS-VVS':
+        return grp in ['VVS', 'VS']
+    else:
+        return grp == group_clarity
+
+df = pd.read_csv(local_file, sep=',', low_memory=False,
+                 dtype={'floCol': str, 'canadamarkeligible': str})
+
+df.columns = [col.strip().lower() for col in df.columns]
+print("Normalized columns:", df.columns.tolist())
+
+# Filtering using the correct column names
+df = df[df['lab'].isin(['IGI', 'GIA'])]
+df = df[df['col'].isin(['D', 'E', 'F'])]
+df = df[df['image'].notnull() & (df['image'].astype(str).str.strip() != "")]
+df = df[df['video'].notnull() & (df['video'].astype(str).str.strip() != "")]
+
+df['FinalShape'] = df.apply(map_shape, axis=1)
+allowed_shapes = ['Round', 'Oval', 'Princess', 'Emerald', 'Asscher', 'Cushion', 'Marquise', 'Pear', 'Radiant', 'Heart']
+df = df[df['FinalShape'].isin(allowed_shapes)]
+df['Ratio'] = df.apply(compute_ratio, axis=1)
+df['Measurement'] = df.apply(compute_measurement, axis=1)
+df['v360 link'] = df['reportno'].apply(lambda x: f"https://loupe360.com/diamond/{x}/video/500/500")
+
+df = df[df.apply(valid_cut, axis=1)]
+df = df[df['pol'].astype(str).str.strip().str.upper().isin(['EX', 'EXCELLENT'])]
+df = df[df['symm'].astype(str).str.strip().str.upper().isin(['EX', 'EXCELLENT'])]
+
+groups = [
+    {'min_carat': 0.95, 'max_carat': 1.10, 'clarity': 'VVS', 'count': 28},
+    {'min_carat': 0.95, 'max_carat': 1.10, 'clarity': 'VS', 'count': 20},
+    {'min_carat': 1.45, 'max_carat': 1.60, 'clarity': 'VVS', 'count': 28},
+    {'min_carat': 1.45, 'max_carat': 1.60, 'clarity': 'VS', 'count': 20},
+    {'min_carat': 1.95, 'max_carat': 2.10, 'clarity': 'VVS', 'count': 28},
+    {'min_carat': 1.95, 'max_carat': 2.10, 'clarity': 'VS', 'count': 20},
+    {'min_carat': 2.45, 'max_carat': 2.60, 'clarity': 'VVS', 'count': 28},
+    {'min_carat': 2.45, 'max_carat': 2.60, 'clarity': 'VS', 'count': 20},
+    {'min_carat': 2.95, 'max_carat': 3.10, 'clarity': 'VVS', 'count': 28},
+    {'min_carat': 2.95, 'max_carat': 3.10, 'clarity': 'VS', 'count': 20},
+    {'min_carat': 3.45, 'max_carat': 3.60, 'clarity': 'VVS', 'count': 28},
+    {'min_carat': 3.45, 'max_carat': 3.60, 'clarity': 'VS', 'count': 20},
+    {'min_carat': 3.95, 'max_carat': 4.10, 'clarity': 'VVS', 'count': 28},
+    {'min_carat': 3.95, 'max_carat': 4.10, 'clarity': 'VS', 'count': 20},
+    {'min_carat': 4.50, 'max_carat': 4.99, 'clarity': 'VS-VVS', 'count': 28},
+    {'min_carat': 5.00, 'max_carat': 5.99, 'clarity': 'VS-VVS', 'count': 28},
+    {'min_carat': 6.00, 'max_carat': 6.99, 'clarity': 'VS-VVS', 'count': 28},
+    {'min_carat': 7.00, 'max_carat': 7.99, 'clarity': 'VS-VVS', 'count': 28},
+    {'min_carat': 8.00, 'max_carat': 8.99, 'clarity': 'VS-VVS', 'count': 28},
+]
+
+target_per_shape = 480
+final_selection = []
+
+for shape in allowed_shapes:
+    shape_pool = df[df['FinalShape'] == shape]
+    shape_selected = pd.DataFrame()
+    for grp in groups:
+        group_df = shape_pool[
+            (shape_pool['carats'] >= grp['min_carat']) &
+            (shape_pool['carats'] <= grp['max_carat']) &
+            (shape_pool['clar'].apply(lambda x: clarity_matches(x, grp['clarity'])))
+        ]
+        group_df_sorted = group_df.sort_values(by='price', ascending=True)
+        group_sel = group_df_sorted.head(grp['count'])
+        shape_selected = pd.concat([shape_selected, group_sel])
+    shape_selected = shape_selected.drop_duplicates()
+    current_count = len(shape_selected)
+    if current_count < target_per_shape:
+        additional_candidates = shape_pool.drop(shape_selected.index, errors='ignore')
+        additional_sorted = additional_candidates.sort_values(by='price', ascending=True)
+        needed = target_per_shape - current_count
+        additional_sel = additional_sorted.head(needed)
+        shape_selected = pd.concat([shape_selected, additional_sel])
+    if len(shape_selected) > target_per_shape:
+        shape_selected = shape_selected.sort_values(by='price', ascending=True).head(target_per_shape)
+    final_selection.append(shape_selected)
+
+final_df = pd.concat(final_selection).reset_index(drop=True)
+print(f"Balanced selection complete: {len(final_df)} diamonds selected.")
+
+today_str = datetime.today().strftime("%Y%m%d")
+final_df['stock id'] = final_df.index + 1
+final_df['stock id'] = final_df['stock id'].apply(lambda x: f"NVL-{today_str}-{x:02d}")
+
+final_df.rename(columns={
+    'lab': 'LAB',
+    'reportno': 'REPORT NO',
+    'FinalShape': 'Shape',
+    'carats': 'Carat',
+    'col': 'Color',
+    'clar': 'Clarity',
+    'price': 'Price',
+    'cut': 'Cut',
+    'pol': 'Polish',
+    'symm': 'Symmetry',
+    'flo': 'Fluor'
+}, inplace=True)
+
+selected_output_filename = "transformed_diamonds.csv"
+final_df.to_csv(selected_output_filename, index=False)
+print(f"Selected diamonds file written with {len(final_df)} diamonds at {selected_output_filename}.")
+
+##############################################
+# PART 2: PRICE CONVERSION & SHOPIFY UPLOAD FORMAT TRANSFORMATION
+##############################################
+
+def get_usd_to_cad_rate():
+    url = "https://v6.exchangerate-api.com/v6/20155ba28afe7c763416cc23/latest/USD"
+    try:
+        response = requests.get(url)
+        data = response.json()
+        return data["conversion_rates"]["CAD"]
     except Exception as e:
-        print(f"Error downloading {remote_filename}: {e}")
+        print("Error fetching exchange rate:", e)
+        return 1.0
 
-def download_all_files():
-    """Download all raw files from the FTP server."""
-    for product_type, file_info in ftp_files.items():
-        download_file_from_ftp(file_info["remote_filename"], file_info["local_path"])
+usd_to_cad_rate = get_usd_to_cad_rate()
+print(f"USD to CAD rate: {usd_to_cad_rate}")
 
-# ----------------------------
-# PINTEREST PROCESSING SCRIPT
-# ----------------------------
+def markup(x):
+    cad = x * usd_to_cad_rate
+    base = cad * 1.05 * 1.13
+    additional = (
+        250 if cad <= 500 else
+        405 if cad <= 1000 else
+        600 if cad <= 1500 else
+        800 if cad <= 2000 else
+        1000 if cad <= 2500 else
+        1200 if cad <= 3000 else
+        1300 if cad <= 5000 else
+        1600 if cad <= 100000 else
+        0
+    ) * 1.15
+    return round(base + additional, 2)
 
-class DiamondCatalogProcessor:
-    def __init__(self):
-        # Instead of hard-coded paths, use the downloaded files from FTP.
-        # The FTP download step ensures these files are available in ftp_download_dir.
-        self.files_to_load = {
-            "natural": {
-                "file_path": os.path.join(os.environ.get("FTP_DOWNLOAD_DIR", "/tmp/raw"), "Natural.csv")
-            },
-            "lab_grown": {
-                "file_path": os.path.join(os.environ.get("FTP_DOWNLOAD_DIR", "/tmp/raw"), "Labgrown.csv")
-            },
-            "gemstone": {
-                "file_path": os.path.join(os.environ.get("FTP_DOWNLOAD_DIR", "/tmp/raw"), "gemstones.csv")
-            }
-        }
-        # Google Cloud Storage configuration via environment variables
-        self.gcs_config = {
-            "bucket_name": os.environ.get("BUCKET_NAME", "sitemaps.leeladiamond.com"),
-            "bucket_folder": os.environ.get("BUCKET_FOLDER", "pinterestfinal")
-        }
-        # Output folder for generated files; default to /tmp/pinterest_output
-        self.output_folder = os.environ.get("OUTPUT_FOLDER", "/tmp/pinterest_output")
-        os.makedirs(self.output_folder, exist_ok=True)
+final_df['CAD_Price'] = final_df['Price'].apply(markup).round(2)
+final_df['Compare_At_Price'] = (final_df['CAD_Price'] * 1.5).round(2)
+final_df['Ratio'] = final_df['Ratio'].round(2)
 
-    def process_file(self, file_path, product_type):
-        df = pd.read_csv(file_path, dtype=str)
-        df = df.fillna('')
+custom_collection = f"Lab-Created Diamonds-{today_str}"
 
-        if 'image' in df.columns:
-            df['image'] = df['image'].str.extract(r'(https?://.*\.(jpg|png))')[0].fillna('')
-            df = df[df['image'] != '']
-        else:
-            df['image'] = ''
+def clean_image_url(url):
+    if pd.isna(url):
+        return url
+    if "?" in url:
+        return url.split("?")[0]
+    return url
 
-        df['price'] = pd.to_numeric(df.get('price', 0), errors='coerce').fillna(0)
+def generate_handle(row):
+    return f"Lab-Grown-{row['Shape']}-Diamond-{row['Carat']}-Carat-{row['Color']}-{row['Clarity']}-Clarity-{row['REPORT NO']}"
 
-        def markup(x):
-            base = x * 1.05 * 1.13
-            additional = (
-                210 if x <= 500 else
-                375 if x <= 1000 else
-                500 if x <= 1500 else
-                700 if x <= 2000 else
-                900 if x <= 2500 else
-                1100 if x <= 3000 else
-                1200 if x <= 5000 else
-                1500 if x <= 100000 else
-                0
-            ) * 1.15
-            return round(base + additional, 2)
+def generate_title(row):
+    return f"{row['Shape']}-{row['Carat']}-Carat-{row['Color']}-{row['Clarity']}-{row['LAB']}-Certified - {row['REPORT NO']}"
 
-        df['price'] = df['price'].apply(markup)
-        df['id'] = df['ReportNo'] + "CA"
+def generate_body_html(row):
+    return (f"Discover timeless beauty with our {row['Shape']} Cut Diamond, a stunning {row['Carat']}-carat gem "
+            f"boasting a rare {row['Color']} color and impeccable {row['Clarity']} clarity. All our diamonds feature "
+            f"the best cut, polish, and symmetry ratios and are certified by {row['LAB']}. Report Number: {row['REPORT NO']}. "
+            f"Elevate your jewelry collection with this exquisite combination of elegance and brilliance. Explore now for a truly exceptional and radiant choice.")
 
-        product_templates = {
-            "natural": {
-                "title": lambda row: f"{row['shape']}-{row['carats']} Carats-{row['col']} Color-{row['clar']} Clarity-{row['lab']} Certified-{row['shape']}-Natural Diamond",
-                "description": lambda row: f"Discover sustainable luxury with our natural {row['shape']} diamond: {row['carats']} carats, {row['col']} color, and {row['clar']} clarity. Perfect for custom creations. Measurements: {row['length']}-{row['width']}x{row['height']} mm. Cut: {row['cut']}, Polish: {row['pol']}, Symmetry: {row['symm']}, Table: {row['table']}%, Depth: {row['depth']}%, Fluorescence: {row['flo']}. {row['lab']} certified {row['ReportNo']}",
-                "link": lambda row: f"https://leeladiamond.com/pages/natural-diamond-catalog?id={row['ReportNo']}"
-            },
-            "lab_grown": {
-                "title": lambda row: f"{row['shape']}-{row['carats']} Carats-{row['col']} Color-{row['clar']} Clarity-{row['lab']} Certified-{row['shape']}-Lab Grown Diamond",
-                "description": lambda row: f"Discover sustainable luxury with our lab-grown {row['shape']} diamond: {row['carats']} carats, {row['col']} color, and {row['clar']} clarity. Perfect for custom creations. Measurements: {row['length']}-{row['width']}x{row['height']} mm. Cut: {row['cut']}, Polish: {row['pol']}, Symmetry: {row['symm']}, Table: {row['table']}%, Depth: {row['depth']}%, Fluorescence: {row['flo']}. {row['lab']} certified {row['ReportNo']}",
-                "link": lambda row: f"https://leeladiamond.com/pages/lab-grown-diamond-catalog?id={row['ReportNo']}"
-            },
-            "gemstone": {
-                "title": lambda row: f"{row['shape']} {row['Color']} {row['gemType']} Gemstone - {row['carats']} Carats, {row['Clarity']} Clarity, {row['Cut']} Cut, {row['Lab']} Certified",
-                "description": lambda row: f"{row['shape']} {row['gemType']} {row['Color']} Gemstone - {row['carats']} carats, color: {row['Color']}, clarity: {row['Clarity']}, cut: {row['Cut']}, lab: {row['Lab']}, treatment: {row['Treatment']}, origin: {row['Mine of Origin']}, size: {row['length']}x{row['width']} mm.",
-                "link": lambda row: f"https://leeladiamond.com/pages/gemstone-catalog?id={row['ReportNo']}"
-            }
-        }
+def generate_tags(row):
+    return f"Lab-Created Diamonds-{today_str}"
 
-        template = product_templates[product_type]
-        df['title'] = df.apply(template['title'], axis=1)
-        df['description'] = df.apply(template['description'], axis=1)
-        df['link'] = df.apply(template['link'], axis=1)
+def generate_image_alt(row):
+    return (f"Lab-Grown {row['Shape']} Diamond - {row['Carat']} Carats, {row['Color']} Color, {row['Clarity']} Clarity - "
+            f"Certified by {row['LAB']} - Report Number: {row['REPORT NO']}")
 
-        num_rows = len(df)
-        df['image_link'] = df['image']
-        df['availability'] = 'in stock'
-        df['google_product_category'] = [random.choice([189, 190, 191, 197, 192, 194, 6463, 196, 200, 5122, 5123, 7471, 6870, 201, 502979, 6540, 6102, 5996, 198, 5982]) for _ in range(num_rows)]
-        df['average_review_rating'] = [random.randint(4, 5) for _ in range(num_rows)]
-        df['number_of_ratings'] = [random.randint(5, 30) for _ in range(num_rows)]
-        df['condition'] = 'new'
+def generate_title_tag(row):
+    return (f"Lab-Grown {row['Shape']} Diamond, {row['Carat']} Carats, {row['Color']} Color, {row['Clarity']} Clarity, "
+            f"{row['LAB']} Certified - Report Number: {row['REPORT NO']}")
 
-        return df[['id', 'title', 'description', 'link', 'image_link', 'price',
-                   'availability', 'google_product_category', 'average_review_rating',
-                   'number_of_ratings', 'condition']]
+def generate_viewcertilink(row):
+    report_no = row["REPORT NO"]
+    lab = row["LAB"].upper()
+    if lab == "IGI":
+        return f"https://www.igi.org/verify-your-report/?r={report_no}"
+    elif lab == "GIA":
+        return f"https://www.gia.edu/report-check?locale=en_US&reportno={report_no}"
+    else:
+        return ""
 
-    def create_country_specific_files(self, combined_df):
-        try:
-            response = requests.get("https://v6.exchangerate-api.com/v6/20155ba28afe7c763416cc23/latest/USD")
-            if response.status_code != 200:
-                raise Exception(f"Failed to fetch exchange rates: {response.status_code}")
+shopify_df = pd.DataFrame({
+    "Handle": final_df.apply(generate_handle, axis=1),
+    "Title": final_df.apply(generate_title, axis=1),
+    "Body HTML": final_df.apply(generate_body_html, axis=1),
+    "Tags": final_df.apply(generate_tags, axis=1),
+    "Image Src": final_df["image"].apply(clean_image_url),
+    "Image Alt Text": final_df.apply(generate_image_alt, axis=1),
+    "Variant Price": final_df["CAD_Price"].apply(lambda x: f"${x:.2f}"),
+    "Variant Compare At Price": final_df["Compare_At_Price"].apply(lambda x: f"${x:.2f}"),
+    "Metafield: title_tag [string]": final_df.apply(generate_title_tag, axis=1),
+    "Metafield: description_tag [string]": final_df.apply(generate_body_html, axis=1),
+    "Metafield: custom.diacertilab [single_line_text_field]": final_df["LAB"],
+    "Metafield: custom.diacertino [number_integer]": final_df["REPORT NO"],
+    "Metafield: custom.shape [single_line_text_field]": final_df["Shape"],
+    "Metafield: custom.diacarat [number_decimal]": final_df["Carat"],
+    "Metafield: custom.diacolor [single_line_text_field]": final_df["Color"],
+    "Metafield: custom.diaclarity [single_line_text_field]": final_df["Clarity"],
+    "Metafield: custom.diacut [single_line_text_field]": final_df["Cut"],
+    "Metafield: custom.diapolish [single_line_text_field]": final_df["Polish"],
+    "Metafield: custom.diasymmetry [single_line_text_field]": final_df["Symmetry"],
+    "Metafield: custom.diaflourence [single_line_text_field]": final_df["Fluor"],
+    "Metafield: custom.360_video [url]": final_df["v360 link"],
+    "Metafield: custom.viewcertilink [url]": final_df.apply(generate_viewcertilink, axis=1),
+    "Metafield: custom.diameasurement [single_line_text_field]": final_df["Measurement"],
+    "Metafield: custom.diaratio [number_decimal]": final_df["Ratio"].apply(lambda x: f"{x:.2f}"),
+    "Custom Collections": custom_collection,
+    "Metafield: shopify.jewelry-type [list.metaobject_reference]": "shopify--jewelry-type.fine-jewelry",
+    "Metafield: shopify.target-gender [list.metaobject_reference]": "shopify--target-gender.unisex",
+    "Metafield: shopify.jewelry-material [list.metaobject_reference]": "shopify--jewelry-material.diamond",
+    "Metafield: shopify.color-pattern [list.metaobject_reference]": "shopify--color-pattern.gold, shopify--color-pattern.white, shopify--color-pattern.rose-gold",
+    "Variant Metafield: mm-google-shopping.age_group [single_line_text_field]": "adult",
+    "Variant Metafield: mm-google-shopping.gender [single_line_text_field]": "unisex",
+    "Variant Metafield: mm-google-shopping.color [single_line_text_field]": "white/yellow/rose gold",
+    "Metafield: msft_bingads.bing_product_category [string]": "Apparel & Accessories > Jewelry > Loose Stones > Diamonds",
+    "Metafield: msft_bingads.age_group [string]": "adult",
+    "Metafield: msft_bingads.gender [string]": "unisex",
+    "Vendor": "Lab-Grown",
+    "Type": "Lab-Grown Diamond",
+    "Template Suffix": "lab_grown-diamond",
+    "Category: ID": "331",
+    "Category: Name": "Jewelry",
+    "Category": "Apparel & Accessories > Jewelry",
+    "Variant Taxable": "FALSE",
+    "Included / Canada": "TRUE",
+    "Included / International": "TRUE",
+    "Included / United States": "TRUE"
+})
 
-            rates = response.json()["conversion_rates"]
+shopify_output_filename = f"shopify-lg-main-{today_str}.csv"
+shopify_df.to_csv(shopify_output_filename, index=False)
+print(f"Shopify upload file created with {len(shopify_df)} diamonds at {shopify_output_filename}.")
 
-            country_currency = {
-                "US": "USD", "CA": "CAD", "GB": "GBP", "AU": "AUD",
-                "DE": "EUR", "FR": "EUR", "IT": "EUR", "ES": "EUR",
-                "NL": "EUR", "SE": "SEK", "CH": "CHF", "JP": "JPY",
-                "MX": "MXN", "BR": "BRL", "IN": "INR"
-            }
+##############################################
+# PART 3: UPLOAD TO GOOGLE CLOUD STORAGE
+##############################################
 
-            for country, currency in country_currency.items():
-                if currency in rates:
-                    country_data = combined_df.copy()
-                    country_data['id'] = country_data['id'].str.replace('CA', country)
-                    # Ensure price is numeric before conversion
-                    country_data['price'] = pd.to_numeric(country_data['price'], errors='coerce').fillna(0)
-                    country_data['price'] = (country_data['price'] * rates[currency]).round(2)
-                    output_file = os.path.join(self.output_folder, f"{country}-pinterest-csv.csv")
-                    country_data.to_csv(output_file, index=False)
-                    print(f"Created file for {country}")
-        except Exception as e:
-            print(f"Error in currency conversion: {e}")
+def upload_to_gcs(source_file, destination_blob, bucket_name):
+    # Load credentials explicitly from the file at /tmp/gcp_credentials.json
+    storage_client = storage.Client.from_service_account_json("/tmp/gcp_credentials.json")
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(destination_blob)
+    blob.upload_from_filename(source_file)
+    print(f"File {source_file} uploaded to {destination_blob} in bucket {bucket_name}.")
 
-    def upload_to_gcs(self):
-        try:
-            storage_client = storage.Client()
-            bucket = storage_client.bucket(self.gcs_config["bucket_name"])
-
-            for file_name in os.listdir(self.output_folder):
-                file_path = os.path.join(self.output_folder, file_name)
-                if os.path.isfile(file_path):
-                    destination_blob_name = f"{self.gcs_config['bucket_folder']}/{file_name}"
-                    blob = bucket.blob(destination_blob_name)
-                    blob.upload_from_filename(file_path)
-                    print(f"Uploaded {file_name} to GCS")
-        except Exception as e:
-            print(f"GCS upload error: {e}")
-
-    def run(self):
-        try:
-            # Step 1: Download raw files from FTP
-            download_all_files()
-
-            # Step 2: Process each file from the downloaded raw files
-            dataframes = []
-            for product_type, file_info in self.files_to_load.items():
-                dataframes.append(self.process_file(file_info["file_path"], product_type))
-
-            combined_df = pd.concat(dataframes, ignore_index=True)
-            # Save the combined catalog in the output folder
-            combined_file = os.path.join(self.output_folder, "combined_catalog.csv")
-            combined_df.to_csv(combined_file, index=False)
-            print(f"Combined catalog saved to {combined_file}")
-
-            # Create country-specific files with updated prices
-            self.create_country_specific_files(combined_df)
-            # Upload the generated files to Google Cloud Storage
-            self.upload_to_gcs()
-
-            print("Processing completed successfully")
-        except Exception as e:
-            print(f"Error in main process: {e}")
-
-if __name__ == "__main__":
-    processor = DiamondCatalogProcessor()
-    processor.run()
+bucket_name = "sitemaps.leeladiamond.com"
+destination_blob = f"shopify final/{shopify_output_filename}"
+upload_to_gcs(shopify_output_filename, destination_blob, bucket_name)
