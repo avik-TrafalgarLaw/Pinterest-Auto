@@ -110,12 +110,12 @@ class DiamondCatalogProcessor:
         product_templates = {
             "natural": {
                 "title": lambda row: f"{row['shape']}-{row['carats']} Carats-{row['col']} Color-{row['clar']} Clarity-{row['lab']} Certified-{row['shape']}-Natural Diamond",
-                "description": lambda row: f"Discover sustainable luxury with our natural {row['shape']} diamond: {row['carats']} carats, {row['col']} color, and {row['clar']} clarity. Perfect for custom creations. Measurements: {row['length']}-{row['width']}x{row['height']} mm. Cut: {row['cut']}, Polish: {row['pol']}, Symmetry: {row['symm']}, Table: {row['table']}%, Depth: {row['depth']}%, Fluorescence: {row['flo']}. {row['lab']} certified {row['ReportNo']}",
+                "description": lambda row: f"Discover sustainable luxury with our natural {row['shape']} diamond: {row['carats']} carats, {row['col']} color, and {row['clar']} clarity. Perfect for custom creations. Measurements: {row['length']}-{row['width']}x{row['height']} mm. Cut: {row['cut']}, Polish: {row['pol']}, Symmetry: {row['symm']}, Table: {row['table']}%, Depth: {row['depth']}%, Fluorescence: {row['flo']}. {row['lab']} certified {row['shape']}",
                 "link": lambda row: f"https://leeladiamond.com/pages/natural-diamond-catalog?id={row['ReportNo']}"
             },
             "lab_grown": {
                 "title": lambda row: f"{row['shape']}-{row['carats']} Carats-{row['col']} Color-{row['clar']} Clarity-{row['lab']} Certified-{row['shape']}-Lab Grown Diamond",
-                "description": lambda row: f"Discover sustainable luxury with our lab-grown {row['shape']} diamond: {row['carats']} carats, {row['col']} color, and {row['clar']} clarity. Perfect for custom creations. Measurements: {row['length']}-{row['width']}x{row['height']} mm. Cut: {row['cut']}, Polish: {row['pol']}, Symmetry: {row['symm']}, Table: {row['table']}%, Depth: {row['depth']}%, Fluorescence: {row['flo']}. {row['lab']} certified {row['ReportNo']}",
+                "description": lambda row: f"Discover sustainable luxury with our lab-grown {row['shape']} diamond: {row['carats']} carats, {row['col']} color, and {row['clar']} clarity. Perfect for custom creations. Measurements: {row['length']}-{row['width']}x{row['height']} mm. Cut: {row['cut']}, Polish: {row['pol']}, Symmetry: {row['symm']}, Table: {row['table']}%, Depth: {row['depth']}%, Fluorescence: {row['flo']}. {row['lab']} certified {row['shape']}",
                 "link": lambda row: f"https://leeladiamond.com/pages/lab-grown-diamond-catalog?id={row['ReportNo']}"
             },
             "gemstone": {
