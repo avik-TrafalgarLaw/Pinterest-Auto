@@ -38,6 +38,7 @@ def download_file_from_ftp(remote_filename, local_path):
         with ftplib.FTP() as ftp:
             ftp.connect(FTP_SERVER, FTP_PORT)
             ftp.login(FTP_USERNAME, FTP_PASSWORD)
+            ftp.set_pasv(True)
             with open(local_path, 'wb') as f:
                 ftp.retrbinary(f"RETR {remote_filename}", f.write)
             print(f"Downloaded {remote_filename} to {local_path}")
